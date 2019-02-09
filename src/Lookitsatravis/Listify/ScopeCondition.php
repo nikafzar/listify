@@ -1,10 +1,4 @@
 <?php
-/**
- * Created by PhpStorm.
- * User: Kaproid
- * Date: 2/9/2019
- * Time: 11:46 PM
- */
 
 namespace Lookitsatravis\Listify;
 
@@ -22,6 +16,7 @@ trait ScopeCondition
     /**
      * Returns the raw WHERE clause to be used as the Listify scope
      * @return string
+     * @throws Exceptions\InvalidQueryBuilderException
      * @throws InvalidScopeException
      * @throws NullForeignKeyException
      * @throws NullScopeException
@@ -53,16 +48,14 @@ trait ScopeCondition
             if ($relationshipId === NULL)
                 throw new NullForeignKeyException('The Listify scope is a "belongsTo" relationship, but the foreign key is null.');
 
-            $theScope = $theScope->getForeignKey() . ' = ' . $this->getAttribute($theScope->getForeignKey());
-            return $theScope;
+            return $theScope->getForeignKey() . ' = ' . $this->getAttribute($theScope->getForeignKey());
         }
         if ($reflector->getName() != 'Illuminate\Database\Query\Builder')
             throw new InvalidScopeException('Listify scope parameter must be a String, an Eloquent BelongsTo object, or a Query Builder object.');
 
-        $theQuery = $this->getConditionStringFromQueryBuilder($theScope);
+        $theQuery = (new GetConditionStringFromQueryBuilder)->handle($theScope);
         $this->stringScopeValue = $theQuery;
-        $theScope = $theQuery;
-        return $theScope;
+        return $theQuery;
     }
 
 }
