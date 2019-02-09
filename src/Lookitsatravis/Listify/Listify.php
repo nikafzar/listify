@@ -1,11 +1,13 @@
 <?php namespace Lookitsatravis\Listify;
 
-use DB, Event, Config, App;
-use Lookitsatravis\Listify\Exceptions\ListifyException;
+use App;
+use Config;
+use DB;
+use Event;
+use Lookitsatravis\Listify\Exceptions\InvalidQueryBuilderException;
+use Lookitsatravis\Listify\Exceptions\InvalidScopeException;
 use Lookitsatravis\Listify\Exceptions\NullForeignKeyException;
 use Lookitsatravis\Listify\Exceptions\NullScopeException;
-use Lookitsatravis\Listify\Exceptions\InvalidScopeException;
-use Lookitsatravis\Listify\Exceptions\InvalidQueryBuilderException;
 
 /**
  * Gives some nice sorting features to a model.
@@ -18,7 +20,6 @@ use Lookitsatravis\Listify\Exceptions\InvalidQueryBuilderException;
  * @author Travis Vignon <travis@lookitsatravis.com>
  * @link
  */
-
 trait Listify
 {
     /**
@@ -70,6 +71,37 @@ trait Listify
     //
 
     /**
+     * Returns whether the scope has changed during the course of interaction with the model
+     * @return boolean
+     */
+    public static function bootListify()
+    {
+        //Bind to model events
+        static::deleting(function ($model) {
+            $model->reloadPosition();
+        });
+
+        static::deleted(function ($model) {
+            $model->decrementPositionsOnLowerItems();
+        });
+
+        static::updating(function ($model) {
+            $model->checkScope();
+        });
+
+        static::updated(function ($model) {
+            $model->updatePositions();
+        });
+
+        static::creating(function ($model) {
+            if ($model->addNewAt()) {
+                $method_name = "addToList" . $model->addNewAt();
+                $model->$method_name();
+            }
+        });
+    }
+
+    /**
      * Required to override options and kick off the Listify's automatic list management.
      * @param  array $options [column=>string, scope=>string|BelongsTo|Builder, top_of_list=>int, add_new_at=>string]
      * @return void
@@ -78,185 +110,6 @@ trait Listify
     {
         //Update config with options
         $this->listifyConfig = array_replace($this->listifyConfig, $options);
-    }
-
-    /**
-     * Returns whether the scope has changed during the course of interaction with the model
-     * @return boolean
-     */
-    public static function bootListify()
-    {
-        //Bind to model events
-        static::deleting(function($model)
-        {
-            $model->reloadPosition();
-        });
-
-        static::deleted(function($model)
-        {
-            $model->decrementPositionsOnLowerItems();
-        });
-
-        static::updating(function($model)
-        {
-            $model->checkScope();
-        });
-
-        static::updated(function($model)
-        {
-            $model->updatePositions();
-        });
-
-        static::creating(function($model)
-        {
-            if($model->addNewAt())
-            {
-                $method_name = "addToList" . $model->addNewAt();
-                $model->$method_name();
-            }
-        });
-    }
-
-    /**
-     * Returns whether the scope has changed during the course of interaction with the model
-     * @return boolean
-     */
-    private function hasScopeChanged()
-    {
-        $theScope = $this->scopeName();
-
-        if(is_string($theScope))
-        {
-            if(!$this->stringScopeValue)
-            {
-                $this->stringScopeValue = $theScope;
-                return FALSE;
-            }
-
-            return $theScope != $this->stringScopeValue;
-        }
-
-        $reflector = new \ReflectionClass($theScope);
-        if($reflector->getName() == 'Illuminate\Database\Eloquent\Relations\BelongsTo')
-        {
-            $originalVal = $this->getOriginal()[$theScope->getForeignKey()];
-            $currentVal = $this->getAttribute($theScope->getForeignKey());
-
-            if($originalVal != $currentVal) return TRUE;
-        }
-        else if ($reflector->getName() == 'Illuminate\Database\Query\Builder')
-        {
-            if(!$this->stringScopeValue)
-            {
-                $this->stringScopeValue = $this->getConditionStringFromQueryBuilder($theScope);
-                return FALSE;
-            }
-
-            $theQuery = $this->getConditionStringFromQueryBuilder($theScope);
-            if($theQuery != $this->stringScopeValue) return TRUE;
-        }
-
-        return FALSE;
-    }
-
-    /**
-     * Returns the raw WHERE clause to be used as the Listify scope
-     * @return string
-     */
-    private function scopeCondition()
-    {
-        $theScope = $this->scopeName();
-
-        if($theScope === NULL)
-        {
-            throw new NullScopeException('You cannot pass in a null scope into Listify. It breaks stuff.');
-        }
-
-        if($theScope !== $this->defaultScope)
-        {
-            if(is_string($theScope))
-            {
-                //Good for you for being brave. Let's hope it'll run in your DB! You sanitized it, right?
-                $this->stringScopeValue = $theScope;
-            }
-            else
-            {
-                if(is_object($theScope))
-                {
-                    $reflector = new \ReflectionClass($theScope);
-                    if($reflector->getName() == 'Illuminate\Database\Eloquent\Relations\BelongsTo')
-                    {
-                        $relationshipId = $this->getAttribute($theScope->getForeignKey());
-
-                        if($relationshipId === NULL)
-                        {
-                            throw new NullForeignKeyException('The Listify scope is a "belongsTo" relationship, but the foreign key is null.');
-                        }
-                        else
-                        {
-                            $theScope = $theScope->getForeignKey() . ' = ' . $this->getAttribute($theScope->getForeignKey());
-                        }
-                    }
-                    else if ($reflector->getName() == 'Illuminate\Database\Query\Builder')
-                    {
-                        $theQuery = $this->getConditionStringFromQueryBuilder($theScope);
-                        $this->stringScopeValue = $theQuery;
-                        $theScope = $theQuery;
-                    }
-                    else
-                    {
-                        throw new InvalidScopeException('Listify scope parameter must be a String, an Eloquent BelongsTo object, or a Query Builder object.');
-                    }
-                }
-                else
-                {
-                    throw new InvalidScopeException('Listify scope parameter must be a String, an Eloquent BelongsTo object, or a Query Builder object.');
-                }
-            }
-        }
-
-        return $theScope;
-    }
-
-    /**
-     * Returns a raw WHERE clause based off of a Query Builder object
-     * @param  $query A Query Builder instance
-     * @return string
-     */
-    private function getConditionStringFromQueryBuilder($query)
-    {
-        $initialQueryChunks = explode('where ', $query->toSql());
-        if(count($initialQueryChunks) == 1) throw new InvalidQueryBuilderException('The Listify scope is a Query Builder object, but it has no "where", so it can\'t be used as a scope.');
-        $queryChunks = explode('?', $initialQueryChunks[1]);
-        $bindings = $query->getBindings();
-
-        $theQuery = '';
-
-        for($i = 0; $i < count($queryChunks); $i++)
-        {
-            // "boolean"
-            // "integer"
-            // "double" (for historical reasons "double" is returned in case of a float, and not simply "float")
-            // "string"
-            // "array"
-            // "object"
-            // "resource"
-            // "NULL"
-            // "unknown type"
-
-            $theQuery .= $queryChunks[$i];
-            if(isset($bindings[$i]))
-            {
-                switch(gettype($bindings[$i]))
-                {
-                    case "string":
-                        $theQuery .= '\'' . $bindings[$i] . '\'';
-                        break;
-                }
-            }
-        }
-
-        return $theQuery;
     }
 
     /**
@@ -270,42 +123,46 @@ trait Listify
     }
 
     /**
-     * An Eloquent scope that returns only items currently in the list
-     * @param $query
-     * @return Eloquent Query Builder instance
-     */
-    public function scopeInList($query)
-    {
-        return $query->listifyScope()->whereNotNull($this->getTable() . "." . $this->positionColumn());
-    }
-
-    /**
-     * Get the value of the "top_of_list" option
+     * Returns the raw WHERE clause to be used as the Listify scope
      * @return string
      */
-    public function listifyTop()
+    private function scopeCondition()
     {
-        return $this->listifyConfig['top_of_list'];
-    }
+        $theScope = $this->scopeName();
 
-    /**
-     * Updates a listify config value
-     * @param string
-     * @param mixed
-     * @return void
-     */
-    public function setListifyConfig($key, $value)
-    {
-        $this->listifyConfig[$key] = $value;
-    }
+        if ($theScope === NULL) {
+            throw new NullScopeException('You cannot pass in a null scope into Listify. It breaks stuff.');
+        }
 
-    /**
-     * Get the name of the position 'column' option
-     * @return string
-     */
-    public function positionColumn()
-    {
-        return $this->listifyConfig['column'];
+        if ($theScope !== $this->defaultScope) {
+            if (is_string($theScope)) {
+                //Good for you for being brave. Let's hope it'll run in your DB! You sanitized it, right?
+                $this->stringScopeValue = $theScope;
+            } else {
+                if (is_object($theScope)) {
+                    $reflector = new \ReflectionClass($theScope);
+                    if ($reflector->getName() == 'Illuminate\Database\Eloquent\Relations\BelongsTo') {
+                        $relationshipId = $this->getAttribute($theScope->getForeignKey());
+
+                        if ($relationshipId === NULL) {
+                            throw new NullForeignKeyException('The Listify scope is a "belongsTo" relationship, but the foreign key is null.');
+                        } else {
+                            $theScope = $theScope->getForeignKey() . ' = ' . $this->getAttribute($theScope->getForeignKey());
+                        }
+                    } else if ($reflector->getName() == 'Illuminate\Database\Query\Builder') {
+                        $theQuery = $this->getConditionStringFromQueryBuilder($theScope);
+                        $this->stringScopeValue = $theQuery;
+                        $theScope = $theQuery;
+                    } else {
+                        throw new InvalidScopeException('Listify scope parameter must be a String, an Eloquent BelongsTo object, or a Query Builder object.');
+                    }
+                } else {
+                    throw new InvalidScopeException('Listify scope parameter must be a String, an Eloquent BelongsTo object, or a Query Builder object.');
+                }
+            }
+        }
+
+        return $theScope;
     }
 
     /**
@@ -318,31 +175,60 @@ trait Listify
     }
 
     /**
-     * Returns the value of the 'add_new_at' option
+     * Returns a raw WHERE clause based off of a Query Builder object
+     * @param  $query A Query Builder instance
      * @return string
      */
-    public function addNewAt()
+    private function getConditionStringFromQueryBuilder($query)
     {
-        return $this->listifyConfig['add_new_at'];
+        $initialQueryChunks = explode('where ', $query->toSql());
+        if (count($initialQueryChunks) == 1) throw new InvalidQueryBuilderException('The Listify scope is a Query Builder object, but it has no "where", so it can\'t be used as a scope.');
+        $queryChunks = explode('?', $initialQueryChunks[1]);
+        $bindings = $query->getBindings();
+
+        $theQuery = '';
+
+        for ($i = 0; $i < count($queryChunks); $i++) {
+            // "boolean"
+            // "integer"
+            // "double" (for historical reasons "double" is returned in case of a float, and not simply "float")
+            // "string"
+            // "array"
+            // "object"
+            // "resource"
+            // "NULL"
+            // "unknown type"
+
+            $theQuery .= $queryChunks[$i];
+            if (isset($bindings[$i])) {
+                switch (gettype($bindings[$i])) {
+                    case "string":
+                        $theQuery .= '\'' . $bindings[$i] . '\'';
+                        break;
+                }
+            }
+        }
+
+        return $theQuery;
     }
 
     /**
-     * Returns the value of the model's current position
-     * @return int
+     * An Eloquent scope that returns only items currently in the list
+     * @param $query
+     * @return Eloquent Query Builder instance
      */
-    public function getListifyPosition()
+    public function scopeInList($query)
     {
-        return $this->getAttribute($this->positionColumn());
+        return $query->listifyScope()->whereNotNull($this->getTable() . "." . $this->positionColumn());
     }
 
     /**
-     * Sets the value of the model's position
-     * @param int $position
-     * @return void
+     * Get the name of the position 'column' option
+     * @return string
      */
-    public function setListifyPosition($position)
+    public function positionColumn()
     {
-        $this->setAttribute($this->positionColumn(), $position);
+        return $this->listifyConfig['column'];
     }
 
     /**
@@ -352,187 +238,36 @@ trait Listify
      */
     public function insertAt($position = NULL)
     {
-        if($position === NULL) $position = $this->listifyTop();
+        if ($position === NULL) $position = $this->listifyTop();
         $this->insertAtPosition($position);
     }
 
     /**
-     * Swap positions with the next lower item, if one exists.
-     * @return void
+     * Get the value of the "top_of_list" option
+     * @return string
      */
-    public function moveLower()
+    public function listifyTop()
     {
-        if(!$this->lowerItem()) return;
-
-        $this->getConnection()->transaction(function()
-        {
-            $this->lowerItem()->decrement($this->positionColumn());
-            $this->increment($this->positionColumn());
-        });
+        return $this->listifyConfig['top_of_list'];
     }
 
     /**
-     * Swap positions with the next higher item, if one exists.
+     * Inserts the item at a particular location in the list. All items around it will be modified
+     * @param  int $position
      * @return void
      */
-    public function moveHigher()
+    private function insertAtPosition($position)
     {
-        if(!$this->higherItem()) return;
+        if ($this->isInList()) {
+            $old_position = $this->getListifyPosition();
+            if ($position == $old_position) return;
 
-        $this->getConnection()->transaction(function()
-        {
-            $this->higherItem()->increment($this->positionColumn());
-            $this->decrement($this->positionColumn());
-        });
-    }
-
-    /**
-     * Move to the bottom of the list. If the item is already in the list, the items below it have their positions adjusted accordingly.
-     * @return void
-     */
-    public function moveToBottom()
-    {
-        if($this->isNotInList()) return NULL;
-
-        $this->getConnection()->transaction(function()
-        {
-            $this->decrementPositionsOnLowerItems();
-            $this->assumeBottomPosition();
-        });
-    }
-
-    /**
-     * Move to the top of the list. If the item is already in the list, the items above it have their positions adjusted accordingly.
-     * @return void
-     */
-    public function moveToTop()
-    {
-        if($this->isNotInList()) return NULL;
-
-        $this->getConnection()->transaction(function()
-        {
-            $this->incrementPositionsOnHigherItems();
-            $this->assumeTopPosition();
-        });
-    }
-
-    /**
-     * Removes the item from the list.
-     * @return void
-     */
-    public function removeFromList()
-    {
-        if($this->isInList())
-        {
-            $this->decrementPositionsOnLowerItems();
-            $this->setListPosition(NULL);
+            $this->shufflePositionsOnIntermediateItems($old_position, $position);
+        } else {
+            $this->incrementPositionsOnLowerItems($position);
         }
-    }
 
-    /**
-     * Increase the position of this item without adjusting the rest of the list.
-     * @return void
-     */
-    public function incrementPosition()
-    {
-        if($this->isNotInList()) return NULL;
-        $this->setListifyPosition($this->getListifyPosition() + 1);
-    }
-
-    /**
-     * Decrease the position of this item without adjusting the rest of the list.
-     * @return void
-     */
-    public function decrementPosition()
-    {
-        if($this->isNotInList()) return NULL;
-        $this->setListifyPosition($this->getListifyPosition() - 1);
-    }
-
-    /**
-     * Returns if this object is the first in the list.
-     * @return boolean
-     */
-    public function isFirst()
-    {
-        if($this->isNotInList()) return FALSE;
-        if($this->getListifyPosition() == $this->listifyTop()) return TRUE;
-        return FALSE;
-    }
-
-    /**
-     * Returns if this object is the last in the list.
-     * @return boolean
-     */
-    public function isLast()
-    {
-        if($this->isNotInList()) return FALSE;
-        if($this->getListifyPosition() == $this->bottomPositionInList()) return TRUE;
-        return FALSE;
-    }
-
-    /**
-     * Return the next higher item in the list.
-     * @return mixed Returned item will be of the same type as the current class instance
-     */
-    public function higherItem()
-    {
-        if($this->isNotInList()) return NULL;
-
-        return $this->listifyList()
-            ->where($this->positionColumn(), "<", $this->getListifyPosition())
-            ->orderBy($this->getTable() . "." . $this->positionColumn(), "DESC")
-            ->first();
-    }
-
-    /**
-     * Return the next n higher items in the list. Selects all higher items by default
-     * @param  int $limit The number of items to return
-     * @return mixed Returned items will be of the same type as the current class instance
-     */
-    public function higherItems($limit = NULL)
-    {
-        if($limit === NULL) $limit = $this->listifyList()->count();
-        $position_value = $this->getListifyPosition();
-
-        return $this->listifyList()
-            ->where($this->positionColumn(), "<", $position_value)
-            ->where($this->positionColumn(), ">=", $position_value - $limit)
-            ->take($limit)
-            ->orderBy($this->getTable() . "." . $this->positionColumn(), "ASC")
-            ->get();
-    }
-
-    /**
-     * Return the next lower item in the list.
-     * @return mixed Returned item will be of the same type as the current class instance
-     */
-    public function lowerItem()
-    {
-        if($this->isNotInList()) return NULL;
-
-        return $this->listifyList()
-            ->where($this->positionColumn(), ">", $this->getListifyPosition())
-            ->orderBy($this->getTable() . "." . $this->positionColumn(), "ASC")
-            ->first();
-    }
-
-    /**
-     * Return the next n lower items in the list. Selects all lower items by default.
-     * @param int $limit The number of items to return
-     * @return mixed Returned items will be of the same type as the current class instance
-     */
-    public function lowerItems($limit = NULL)
-    {
-        if($limit === NULL) $limit = $this->listifyList()->count();
-        $position_value = $this->getListifyPosition();
-
-        return $this->listifyList()
-            ->where($this->positionColumn(), '>', $position_value)
-            ->where($this->positionColumn(), '<=', $position_value + $limit)
-            ->take($limit)
-            ->orderBy($this->getTable() . "." . $this->positionColumn(), "ASC")
-            ->get();
+        $this->setListPosition($position);
     }
 
     /**
@@ -554,35 +289,59 @@ trait Listify
     }
 
     /**
-     * Get the default item position
-     * @return mixed
+     * Returns the value of the model's current position
+     * @return int
      */
-    public function defaultPosition()
+    public function getListifyPosition()
     {
-        return NULL;
+        return $this->getAttribute($this->positionColumn());
     }
 
     /**
-     * Returns whether the item's current position matches the default position
-     * @return boolean
-     */
-    public function isDefaultPosition()
-    {
-        return $this->defaultPosition() == $this->getListifyPosition();
-    }
-
-    /**
-     * Sets the new position and saves it
-     * @param int $new_position
+     * Reorders intermediate items to support moving an item from old_position to new_position.
+     * @param  int $old_position
+     * @param  int $new_position
+     * @param  string $avoid_id You can pass in an ID of a record matching the current class and it will be ignored
      * @return void
      */
-    public function setListPosition($new_position)
+    private function shufflePositionsOnIntermediateItems($old_position, $new_position, $avoid_id = NULL)
     {
-        $this->setListifyPosition($new_position);
-        $this->save();
+        if ($old_position == $new_position) return;
+        $avoid_id_condition = $avoid_id ? $this->primaryKey() . " != " . $avoid_id : '1 = 1';
+
+        if ($old_position < $new_position) {
+            // Decrement position of intermediate items
+
+            // e.g., if moving an item from 2 to 5,
+            // move [3, 4, 5] to [2, 3, 4]
+
+            $this->listifyList()
+                ->where($this->positionColumn(), '>', $old_position)
+                ->where($this->positionColumn(), '<=', $new_position)
+                ->whereRaw($avoid_id_condition)
+                ->decrement($this->positionColumn());
+        } else {
+            // Increment position of intermediate items
+
+            // e.g., if moving an item from 5 to 2,
+            // move [2, 3, 4] to [3, 4, 5]
+
+            $this->listifyList()
+                ->where($this->positionColumn(), '>=', $new_position)
+                ->where($this->positionColumn(), '<', $old_position)
+                ->whereRaw($avoid_id_condition)
+                ->increment($this->positionColumn());
+        }
     }
 
-    /* Private Methods */
+    /**
+     * Returns the primary key of the current Eloquent instance
+     * @return string
+     */
+    private function primaryKey()
+    {
+        return $this->getConnection()->getTablePrefix() . $this->getQualifiedKeyName();
+    }
 
     /**
      * Creates an instance of the current class scope as a list
@@ -597,118 +356,14 @@ trait Listify
     }
 
     /**
-     * Adds item to the top of the list
+     * Updates a listify config value
+     * @param string
+     * @param mixed
      * @return void
      */
-    private function addToListTop()
+    public function setListifyConfig($key, $value)
     {
-        $this->incrementPositionsOnAllItems();
-        $this->setListifyPosition($this->listifyTop());
-    }
-
-    /**
-     * Adds item to the bottom of the list
-     * @return void
-     */
-    private function addToListBottom()
-    {
-        if($this->isNotInList())
-        {
-            $this->setListifyPosition($this->bottomPositionInList() + 1);
-        }
-    }
-
-    /**
-     * Returns the bottom position number in the list
-     * @param  mixed $except An Eloquent model instance
-     * @return int
-     */
-    private function bottomPositionInList($except = NULL)
-    {
-        $item = $this->bottomItem($except);
-
-        if($item)
-            return $item->getListifyPosition();
-        else
-            return $this->listifyTop() - 1;
-    }
-
-    /**
-     * Returns the bottom item
-     * @param  mixed $except An Eloquent model instance
-     * @return mixed Returns an item of the same type as the current class instance
-     */
-    private function bottomItem($except = NULL)
-    {
-        $conditions = $this->scopeCondition();
-
-        if($except !== NULL)
-        {
-            $conditions = $conditions . " AND " . $this->primaryKey() . " != " . $except->id;
-        }
-
-        $list = $this->listifyList()
-            ->whereNotNull($this->getTable() . "." . $this->positionColumn())
-            ->whereRaw($conditions)
-            ->orderBy($this->getTable() . "." . $this->positionColumn(), "DESC")
-            ->take(1)->first();
-
-        return $list;
-    }
-
-    /**
-     * Returns the primary key of the current Eloquent instance
-     * @return string
-     */
-    private function primaryKey()
-    {
-        return $this->getConnection()->getTablePrefix() . $this->getQualifiedKeyName();
-    }
-
-    /**
-     * Forces item to assume the bottom position in the list.
-     * @return void
-     */
-    private function assumeBottomPosition()
-    {
-        $this->setListPosition($this->bottomPositionInList($this) + 1);
-    }
-
-    /**
-     * Forces item to assume the top position in the list.
-     * @return void
-     */
-    private function assumeTopPosition()
-    {
-        $this->setListPosition($this->listifyTop());
-    }
-
-    /**
-     * This has the effect of moving all the lower items up one.
-     * @param  int $position All items below the passed in position will be modified
-     * @return void
-     */
-    private function decrementPositionsOnLowerItems($position = NULL)
-    {
-        if($this->isNotInList()) return NULL;
-        if($position === NULL) $position = $this->getListifyPosition();
-
-        $this->listifyList()
-           ->where($this->positionColumn(), '>', $position)
-           ->decrement($this->positionColumn());
-    }
-
-    /**
-     * This has the effect of moving all the higher items down one.
-     * @return void
-     */
-    private function incrementPositionsOnHigherItems()
-    {
-        if($this->isNotInList()) return NULL;
-
-        $this->listifyList()
-           ->where($this->positionColumn(), '<', $this->getListifyPosition())
-           ->increment($this->positionColumn());
+        $this->listifyConfig[$key] = $value;
     }
 
     /**
@@ -724,6 +379,314 @@ trait Listify
     }
 
     /**
+     * Sets the new position and saves it
+     * @param int $new_position
+     * @return void
+     */
+    public function setListPosition($new_position)
+    {
+        $this->setListifyPosition($new_position);
+        $this->save();
+    }
+
+    /**
+     * Sets the value of the model's position
+     * @param int $position
+     * @return void
+     */
+    public function setListifyPosition($position)
+    {
+        $this->setAttribute($this->positionColumn(), $position);
+    }
+
+    /**
+     * Swap positions with the next lower item, if one exists.
+     * @return void
+     */
+    public function moveLower()
+    {
+        if (!$this->lowerItem()) return;
+
+        $this->getConnection()->transaction(function () {
+            $this->lowerItem()->decrement($this->positionColumn());
+            $this->increment($this->positionColumn());
+        });
+    }
+
+    /**
+     * Return the next lower item in the list.
+     * @return mixed Returned item will be of the same type as the current class instance
+     */
+    public function lowerItem()
+    {
+        if ($this->isNotInList()) return NULL;
+
+        return $this->listifyList()
+            ->where($this->positionColumn(), ">", $this->getListifyPosition())
+            ->orderBy($this->getTable() . "." . $this->positionColumn(), "ASC")
+            ->first();
+    }
+
+    /**
+     * Swap positions with the next higher item, if one exists.
+     * @return void
+     */
+    public function moveHigher()
+    {
+        if (!$this->higherItem()) return;
+
+        $this->getConnection()->transaction(function () {
+            $this->higherItem()->increment($this->positionColumn());
+            $this->decrement($this->positionColumn());
+        });
+    }
+
+    /**
+     * Return the next higher item in the list.
+     * @return mixed Returned item will be of the same type as the current class instance
+     */
+    public function higherItem()
+    {
+        if ($this->isNotInList()) return NULL;
+
+        return $this->listifyList()
+            ->where($this->positionColumn(), "<", $this->getListifyPosition())
+            ->orderBy($this->getTable() . "." . $this->positionColumn(), "DESC")
+            ->first();
+    }
+
+    /**
+     * Move to the bottom of the list. If the item is already in the list, the items below it have their positions adjusted accordingly.
+     * @return void
+     */
+    public function moveToBottom()
+    {
+        if ($this->isNotInList()) return NULL;
+
+        $this->getConnection()->transaction(function () {
+            $this->decrementPositionsOnLowerItems();
+            $this->assumeBottomPosition();
+        });
+    }
+
+    /**
+     * This has the effect of moving all the lower items up one.
+     * @param  int $position All items below the passed in position will be modified
+     * @return void
+     */
+    private function decrementPositionsOnLowerItems($position = NULL)
+    {
+        if ($this->isNotInList()) return NULL;
+        if ($position === NULL) $position = $this->getListifyPosition();
+
+        $this->listifyList()
+            ->where($this->positionColumn(), '>', $position)
+            ->decrement($this->positionColumn());
+    }
+
+    /**
+     * Forces item to assume the bottom position in the list.
+     * @return void
+     */
+    private function assumeBottomPosition()
+    {
+        $this->setListPosition($this->bottomPositionInList($this) + 1);
+    }
+
+    /**
+     * Returns the bottom position number in the list
+     * @param  mixed $except An Eloquent model instance
+     * @return int
+     */
+    private function bottomPositionInList($except = NULL)
+    {
+        $item = $this->bottomItem($except);
+
+        if ($item)
+            return $item->getListifyPosition();
+        else
+            return $this->listifyTop() - 1;
+    }
+
+    /**
+     * Returns the bottom item
+     * @param  mixed $except An Eloquent model instance
+     * @return mixed Returns an item of the same type as the current class instance
+     */
+    private function bottomItem($except = NULL)
+    {
+        $conditions = $this->scopeCondition();
+
+        if ($except !== NULL) {
+            $conditions = $conditions . " AND " . $this->primaryKey() . " != " . $except->id;
+        }
+
+        $list = $this->listifyList()
+            ->whereNotNull($this->getTable() . "." . $this->positionColumn())
+            ->whereRaw($conditions)
+            ->orderBy($this->getTable() . "." . $this->positionColumn(), "DESC")
+            ->take(1)->first();
+
+        return $list;
+    }
+
+    /**
+     * Move to the top of the list. If the item is already in the list, the items above it have their positions adjusted accordingly.
+     * @return void
+     */
+    public function moveToTop()
+    {
+        if ($this->isNotInList()) return NULL;
+
+        $this->getConnection()->transaction(function () {
+            $this->incrementPositionsOnHigherItems();
+            $this->assumeTopPosition();
+        });
+    }
+
+    /**
+     * This has the effect of moving all the higher items down one.
+     * @return void
+     */
+    private function incrementPositionsOnHigherItems()
+    {
+        if ($this->isNotInList()) return NULL;
+
+        $this->listifyList()
+            ->where($this->positionColumn(), '<', $this->getListifyPosition())
+            ->increment($this->positionColumn());
+    }
+
+    /**
+     * Forces item to assume the top position in the list.
+     * @return void
+     */
+    private function assumeTopPosition()
+    {
+        $this->setListPosition($this->listifyTop());
+    }
+
+    /* Private Methods */
+
+    /**
+     * Removes the item from the list.
+     * @return void
+     */
+    public function removeFromList()
+    {
+        if ($this->isInList()) {
+            $this->decrementPositionsOnLowerItems();
+            $this->setListPosition(NULL);
+        }
+    }
+
+    /**
+     * Increase the position of this item without adjusting the rest of the list.
+     * @return void
+     */
+    public function incrementPosition()
+    {
+        if ($this->isNotInList()) return NULL;
+        $this->setListifyPosition($this->getListifyPosition() + 1);
+    }
+
+    /**
+     * Decrease the position of this item without adjusting the rest of the list.
+     * @return void
+     */
+    public function decrementPosition()
+    {
+        if ($this->isNotInList()) return NULL;
+        $this->setListifyPosition($this->getListifyPosition() - 1);
+    }
+
+    /**
+     * Returns if this object is the first in the list.
+     * @return boolean
+     */
+    public function isFirst()
+    {
+        if ($this->isNotInList()) return FALSE;
+        if ($this->getListifyPosition() == $this->listifyTop()) return TRUE;
+        return FALSE;
+    }
+
+    /**
+     * Returns if this object is the last in the list.
+     * @return boolean
+     */
+    public function isLast()
+    {
+        if ($this->isNotInList()) return FALSE;
+        if ($this->getListifyPosition() == $this->bottomPositionInList()) return TRUE;
+        return FALSE;
+    }
+
+    /**
+     * Return the next n higher items in the list. Selects all higher items by default
+     * @param  int $limit The number of items to return
+     * @return mixed Returned items will be of the same type as the current class instance
+     */
+    public function higherItems($limit = NULL)
+    {
+        if ($limit === NULL) $limit = $this->listifyList()->count();
+        $position_value = $this->getListifyPosition();
+
+        return $this->listifyList()
+            ->where($this->positionColumn(), "<", $position_value)
+            ->where($this->positionColumn(), ">=", $position_value - $limit)
+            ->take($limit)
+            ->orderBy($this->getTable() . "." . $this->positionColumn(), "ASC")
+            ->get();
+    }
+
+    /**
+     * Return the next n lower items in the list. Selects all lower items by default.
+     * @param int $limit The number of items to return
+     * @return mixed Returned items will be of the same type as the current class instance
+     */
+    public function lowerItems($limit = NULL)
+    {
+        if ($limit === NULL) $limit = $this->listifyList()->count();
+        $position_value = $this->getListifyPosition();
+
+        return $this->listifyList()
+            ->where($this->positionColumn(), '>', $position_value)
+            ->where($this->positionColumn(), '<=', $position_value + $limit)
+            ->take($limit)
+            ->orderBy($this->getTable() . "." . $this->positionColumn(), "ASC")
+            ->get();
+    }
+
+    /**
+     * Returns whether the item's current position matches the default position
+     * @return boolean
+     */
+    public function isDefaultPosition()
+    {
+        return $this->defaultPosition() == $this->getListifyPosition();
+    }
+
+    /**
+     * Get the default item position
+     * @return mixed
+     */
+    public function defaultPosition()
+    {
+        return NULL;
+    }
+
+    /**
+     * Adds item to the top of the list
+     * @return void
+     */
+    private function addToListTop()
+    {
+        $this->incrementPositionsOnAllItems();
+        $this->setListifyPosition($this->listifyTop());
+    }
+
+    /**
      * Increments position of all items in the list.
      * @return void
      */
@@ -734,65 +697,14 @@ trait Listify
     }
 
     /**
-     * Reorders intermediate items to support moving an item from old_position to new_position.
-     * @param  int $old_position
-     * @param  int $new_position
-     * @param  string $avoid_id     You can pass in an ID of a record matching the current class and it will be ignored
+     * Adds item to the bottom of the list
      * @return void
      */
-    private function shufflePositionsOnIntermediateItems($old_position, $new_position, $avoid_id = NULL)
+    private function addToListBottom()
     {
-        if($old_position == $new_position) return;
-        $avoid_id_condition = $avoid_id ? $this->primaryKey() . " != " . $avoid_id : '1 = 1';
-
-        if($old_position < $new_position)
-        {
-            // Decrement position of intermediate items
-
-            // e.g., if moving an item from 2 to 5,
-            // move [3, 4, 5] to [2, 3, 4]
-
-            $this->listifyList()
-                ->where($this->positionColumn(), '>', $old_position)
-                ->where($this->positionColumn(), '<=', $new_position)
-                ->whereRaw($avoid_id_condition)
-                ->decrement($this->positionColumn());
+        if ($this->isNotInList()) {
+            $this->setListifyPosition($this->bottomPositionInList() + 1);
         }
-        else
-        {
-            // Increment position of intermediate items
-
-            // e.g., if moving an item from 5 to 2,
-            // move [2, 3, 4] to [3, 4, 5]
-
-            $this->listifyList()
-                ->where($this->positionColumn(), '>=', $new_position)
-                ->where($this->positionColumn(), '<', $old_position)
-                ->whereRaw($avoid_id_condition)
-                ->increment($this->positionColumn());
-        }
-    }
-
-    /**
-     * Inserts the item at a particular location in the list. All items around it will be modified
-     * @param  int $position
-     * @return void
-     */
-    private function insertAtPosition($position)
-    {
-        if($this->isInList())
-        {
-            $old_position = $this->getListifyPosition();
-            if($position == $old_position) return;
-
-            $this->shufflePositionsOnIntermediateItems($old_position, $position);
-        }
-        else
-        {
-            $this->incrementPositionsOnLowerItems($position);
-        }
-
-        $this->setListPosition($position);
     }
 
     /**
@@ -804,37 +716,16 @@ trait Listify
         $old_position = $this->getOriginal()[$this->positionColumn()];
         $new_position = $this->getListifyPosition();
 
-        if($new_position === NULL)
+        if ($new_position === NULL)
             $matching_position_records = 0;
         else
             $matching_position_records = $this->listifyList()->where($this->positionColumn(), '=', $new_position)->count();
 
-        if($matching_position_records <= 1)
-        {
+        if ($matching_position_records <= 1) {
             return;
         }
 
         $this->shufflePositionsOnIntermediateItems($old_position, $new_position, $this->id);
-    }
-
-    /**
-     * Temporarily swap changes attributes with current attributes
-     * @return void
-     */
-    public function swapChangedAttributes()
-    {
-        if($this->originalAttributesLoaded === FALSE)
-        {
-            $this->swappedAttributes = $this->getAttributes();
-            $this->fill($this->getOriginal());
-            $this->originalAttributesLoaded = TRUE;
-        }
-        else
-        {
-            if(count($this->swappedAttributes) == 0) $this->swappedAttributes = $this->getAttributes();
-            $this->fill($this->swappedAttributes);
-            $this->originalAttributesLoaded = FALSE;
-        }
     }
 
     /**
@@ -843,15 +734,77 @@ trait Listify
      */
     private function checkScope()
     {
-        if($this->hasScopeChanged())
-        {
-            $this->swapChangedAttributes();
-            if($this->lowerItem()) $this->decrementPositionsOnLowerItems();
-            $this->swapChangedAttributes();
-            $this->setListifyPosition(NULL); //make this item "not in the list" so subsequent call to addToListBottom() works (b/c it only operates on items that have no position)
-            $method_name = "addToList" . $this->addNewAt();
-            $this->$method_name();
+        if (!$this->hasScopeChanged())
+            return null;
+
+        $this->swapChangedAttributes();
+        if ($this->lowerItem()) $this->decrementPositionsOnLowerItems();
+        $this->swapChangedAttributes();
+        $this->setListifyPosition(NULL); //make this item "not in the list" so subsequent call to addToListBottom() works (b/c it only operates on items that have no position)
+        $method_name = "addToList" . $this->addNewAt();
+        $this->$method_name();
+    }
+
+    /**
+     * Returns whether the scope has changed during the course of interaction with the model
+     * @return boolean
+     */
+    private function hasScopeChanged()
+    {
+        $theScope = $this->scopeName();
+
+        if (is_string($theScope)) {
+            if (!$this->stringScopeValue) {
+                $this->stringScopeValue = $theScope;
+                return FALSE;
+            }
+
+            return $theScope != $this->stringScopeValue;
         }
+
+        $reflector = new \ReflectionClass($theScope);
+        if ($reflector->getName() == 'Illuminate\Database\Eloquent\Relations\BelongsTo') {
+            $originalVal = $this->getOriginal()[$theScope->getForeignKey()];
+            $currentVal = $this->getAttribute($theScope->getForeignKey());
+
+            if ($originalVal != $currentVal) return TRUE;
+        } else if ($reflector->getName() == 'Illuminate\Database\Query\Builder') {
+            if (!$this->stringScopeValue) {
+                $this->stringScopeValue = $this->getConditionStringFromQueryBuilder($theScope);
+                return FALSE;
+            }
+
+            $theQuery = $this->getConditionStringFromQueryBuilder($theScope);
+            if ($theQuery != $this->stringScopeValue) return TRUE;
+        }
+
+        return FALSE;
+    }
+
+    /**
+     * Temporarily swap changes attributes with current attributes
+     * @return void
+     */
+    public function swapChangedAttributes()
+    {
+        if ($this->originalAttributesLoaded === FALSE) {
+            $this->swappedAttributes = $this->getAttributes();
+            $this->fill($this->getOriginal());
+            $this->originalAttributesLoaded = TRUE;
+        } else {
+            if (count($this->swappedAttributes) == 0) $this->swappedAttributes = $this->getAttributes();
+            $this->fill($this->swappedAttributes);
+            $this->originalAttributesLoaded = FALSE;
+        }
+    }
+
+    /**
+     * Returns the value of the 'add_new_at' option
+     * @return string
+     */
+    public function addNewAt()
+    {
+        return $this->listifyConfig['add_new_at'];
     }
 
     /**
