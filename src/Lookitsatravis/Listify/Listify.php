@@ -5,9 +5,6 @@ use Config;
 use DB;
 use Event;
 use Lookitsatravis\Listify\Exceptions\InvalidQueryBuilderException;
-use Lookitsatravis\Listify\Exceptions\InvalidScopeException;
-use Lookitsatravis\Listify\Exceptions\NullForeignKeyException;
-use Lookitsatravis\Listify\Exceptions\NullScopeException;
 
 /**
  * Gives some nice sorting features to a model.
@@ -22,6 +19,7 @@ use Lookitsatravis\Listify\Exceptions\NullScopeException;
  */
 trait Listify
 {
+    use ScopeCondition;
     /**
      * Array of current config values
      * @var array
@@ -120,96 +118,6 @@ trait Listify
     public function scopeListifyScope($query)
     {
         return $query->whereRaw($this->scopeCondition());
-    }
-
-    /**
-     * Returns the raw WHERE clause to be used as the Listify scope
-     * @return string
-     */
-    private function scopeCondition()
-    {
-        $theScope = $this->scopeName();
-
-        if ($theScope === NULL) {
-            throw new NullScopeException('You cannot pass in a null scope into Listify. It breaks stuff.');
-        }
-
-        if ($theScope !== $this->defaultScope) {
-            if (is_string($theScope)) {
-                //Good for you for being brave. Let's hope it'll run in your DB! You sanitized it, right?
-                $this->stringScopeValue = $theScope;
-            } else {
-                if (is_object($theScope)) {
-                    $reflector = new \ReflectionClass($theScope);
-                    if ($reflector->getName() == 'Illuminate\Database\Eloquent\Relations\BelongsTo') {
-                        $relationshipId = $this->getAttribute($theScope->getForeignKey());
-
-                        if ($relationshipId === NULL) {
-                            throw new NullForeignKeyException('The Listify scope is a "belongsTo" relationship, but the foreign key is null.');
-                        } else {
-                            $theScope = $theScope->getForeignKey() . ' = ' . $this->getAttribute($theScope->getForeignKey());
-                        }
-                    } else if ($reflector->getName() == 'Illuminate\Database\Query\Builder') {
-                        $theQuery = $this->getConditionStringFromQueryBuilder($theScope);
-                        $this->stringScopeValue = $theQuery;
-                        $theScope = $theQuery;
-                    } else {
-                        throw new InvalidScopeException('Listify scope parameter must be a String, an Eloquent BelongsTo object, or a Query Builder object.');
-                    }
-                } else {
-                    throw new InvalidScopeException('Listify scope parameter must be a String, an Eloquent BelongsTo object, or a Query Builder object.');
-                }
-            }
-        }
-
-        return $theScope;
-    }
-
-    /**
-     * Get the value of the 'scope' option
-     * @return mixed Can be a string, an Eloquent BelongsTo, or an Eloquent Builder
-     */
-    public function scopeName()
-    {
-        return $this->listifyConfig['scope'];
-    }
-
-    /**
-     * Returns a raw WHERE clause based off of a Query Builder object
-     * @param  $query A Query Builder instance
-     * @return string
-     */
-    private function getConditionStringFromQueryBuilder($query)
-    {
-        $initialQueryChunks = explode('where ', $query->toSql());
-        if (count($initialQueryChunks) == 1) throw new InvalidQueryBuilderException('The Listify scope is a Query Builder object, but it has no "where", so it can\'t be used as a scope.');
-        $queryChunks = explode('?', $initialQueryChunks[1]);
-        $bindings = $query->getBindings();
-
-        $theQuery = '';
-
-        for ($i = 0; $i < count($queryChunks); $i++) {
-            // "boolean"
-            // "integer"
-            // "double" (for historical reasons "double" is returned in case of a float, and not simply "float")
-            // "string"
-            // "array"
-            // "object"
-            // "resource"
-            // "NULL"
-            // "unknown type"
-
-            $theQuery .= $queryChunks[$i];
-            if (isset($bindings[$i])) {
-                switch (gettype($bindings[$i])) {
-                    case "string":
-                        $theQuery .= '\'' . $bindings[$i] . '\'';
-                        break;
-                }
-            }
-        }
-
-        return $theQuery;
     }
 
     /**
@@ -566,8 +474,6 @@ trait Listify
         $this->setListPosition($this->listifyTop());
     }
 
-    /* Private Methods */
-
     /**
      * Removes the item from the list.
      * @return void
@@ -589,6 +495,8 @@ trait Listify
         if ($this->isNotInList()) return NULL;
         $this->setListifyPosition($this->getListifyPosition() + 1);
     }
+
+    /* Private Methods */
 
     /**
      * Decrease the position of this item without adjusting the rest of the list.
@@ -779,6 +687,53 @@ trait Listify
         }
 
         return FALSE;
+    }
+
+    /**
+     * Get the value of the 'scope' option
+     * @return mixed Can be a string, an Eloquent BelongsTo, or an Eloquent Builder
+     */
+    public function scopeName()
+    {
+        return $this->listifyConfig['scope'];
+    }
+
+    /**
+     * Returns a raw WHERE clause based off of a Query Builder object
+     * @param  $query A Query Builder instance
+     * @return string
+     */
+    private function getConditionStringFromQueryBuilder($query)
+    {
+        $initialQueryChunks = explode('where ', $query->toSql());
+        if (count($initialQueryChunks) == 1) throw new InvalidQueryBuilderException('The Listify scope is a Query Builder object, but it has no "where", so it can\'t be used as a scope.');
+        $queryChunks = explode('?', $initialQueryChunks[1]);
+        $bindings = $query->getBindings();
+
+        $theQuery = '';
+
+        for ($i = 0; $i < count($queryChunks); $i++) {
+            // "boolean"
+            // "integer"
+            // "double" (for historical reasons "double" is returned in case of a float, and not simply "float")
+            // "string"
+            // "array"
+            // "object"
+            // "resource"
+            // "NULL"
+            // "unknown type"
+
+            $theQuery .= $queryChunks[$i];
+            if (isset($bindings[$i])) {
+                switch (gettype($bindings[$i])) {
+                    case "string":
+                        $theQuery .= '\'' . $bindings[$i] . '\'';
+                        break;
+                }
+            }
+        }
+
+        return $theQuery;
     }
 
     /**
